@@ -1,137 +1,249 @@
-function modelParameters = positionEstimatorTraining(training_data)
-% Train per-direction, per-time linear decoders with PCA 
+function modelParameters = positionEstimatorTraining(trainingData)
+% positionEstimatorTraining  Train direction classifier + PCR position decoder.
+%
+% Pipeline
+% --------
+%  1. Direction classification  : PCA -> LDA, nearest-centroid in LDA space.
+%     Trained at t = 320, 400, 480, 560 ms (updated as more spikes arrive).
+%  2. Position decoding         : PCR (Principal Component Regression)
+%     One regressor per (direction, time) pair, dt = 20 ms.
 
-    % Hyperparameters
-    binSize = 20;
-    tStart = 320;
-    Khist = 11;
-    lambda = 4;
-    pcaVarFrac = 0.1;
+% -- Hyperparameters ------------------------------------------------------
+dt_class  = 80;                    % classification bin width (ms)
+t_class   = 320:dt_class:560;     % times at which classifier is retrained
+M_lda     = 7;                     % LDA dimensions kept
+M_pca     = 170;                   % PCA dimensions fed into LDA
+dt_reg    = 20;                    % regression bin width (ms)
+T_end     = 560;                   % last time point used
+t_reg     = 320:dt_reg:T_end;     % regression time grid
+r         = size(trainingData,1)-1; % PCR components = nTrials - 1
 
-    [nTrials, nDir] = size(training_data);
-    nNeurons = size(training_data(1,1).spikes, 1);
-    
-    % Find max time
-    Tmax = 0;
-    for tr = 1:nTrials
-        for d = 1:nDir
-            Tmax = max(Tmax, size(training_data(tr,d).spikes, 2));
-        end
-    end
-    times = tStart : binSize : Tmax;
-    nTime = numel(times);
+% -- 1. Direction Classifier ----------------------------------------------
+% Organise spike-count features: rows = featurextime bins, cols = trials
+[F_cls, labels, t_tag] = organise_features(trainingData, dt_class, t_class(end));
 
-    % (A) Direction templates
-    dirMeanCounts = zeros(nNeurons, nDir);
-    for d = 1:nDir
-        for tr = 1:nTrials
-            sp = training_data(tr,d).spikes;
-            tUse = min(tStart, size(sp,2));
-            dirMeanCounts(:,d) = dirMeanCounts(:,d) + sum(sp(:,1:tUse), 2);
-        end
-        dirMeanCounts(:,d) = dirMeanCounts(:,d) / nTrials;
-    end
+classParams = struct();
+for ti = 1:numel(t_class)
+    T     = t_class(ti);
+    X_sub = F_cls(t_tag <= T, :);   % row-subset: only bins up to time T
 
-    % (B) Collect all features for PCA
-    Fraw = nNeurons * Khist;
-    PhiAll = [];
-    for d = 1:nDir
-        for ti = 1:nTime
-            tNow = times(ti);
-            for tr = 1:nTrials
-                sp = training_data(tr,d).spikes;
-                hp = training_data(tr,d).handPos;
-                if tNow <= size(sp,2) && tNow <= size(hp,2)
-                    phi = makeFeature(sp, tNow, binSize, Khist);
-                    PhiAll = [PhiAll, phi];
-                end
-            end
-        end
+    % PCA, scatter matrices, and LDA all computed on X_sub so dimensions match.
+    % mu_sub has the same number of rows as X_sub, so X_sub - mu_sub is valid.
+    nComp = min(M_pca, size(X_sub, 2) - 1);   % can't exceed rank
+    [~, mu_sub, Wpca_sub, ~] = pca_model(X_sub, nComp);
+    [Sb_sub, Sw_sub]         = scatter_matrices(X_sub, labels);
+    Wopt = lda_from_pca(Wpca_sub, nComp, M_lda, Sb_sub, Sw_sub);
+
+    % Project all samples and store per-class centroids
+    Z = Wopt' * (X_sub - mu_sub);
+    centroids = zeros(M_lda, 8);
+    for k = 1:8
+        centroids(:,k) = mean(Z(:, labels == k), 2);
     end
 
-    if isempty(PhiAll)
-        error('No aligned samples found');
-    end
-
-    % (C) Manual PCA using SVD 
-    muPhi = mean(PhiAll, 2);  % Mean of each feature
-    PhiCentered = bsxfun(@minus, PhiAll, muPhi);  % Center data
-    
-    % SVD for PCA
-    [U, S, ~] = svd(PhiCentered, 'econ');
-    varExplained = (diag(S).^2) / sum(diag(S).^2);  % Variance explained
-    cumVar = cumsum(varExplained);
-    nComp = find(cumVar >= pcaVarFrac, 1, 'first');
-    if isempty(nComp) || nComp > size(U,2)
-        nComp = min(size(U,2), Fraw);
-    end
-    
-    Ured = U(:, 1:nComp);  % Keep top nComp components
-
-    % (D) Per-(direction,time) ridge training
-    W = cell(nDir, nTime);
-    F = nComp + 1;
-    Ireg = eye(F);
-    Ireg(end,end) = 0;  % Don't regularize intercept
-
-    for d = 1:nDir
-        for ti = 1:nTime
-            tNow = times(ti);
-            Xphi = [];
-            Y = [];
-            
-            for tr = 1:nTrials
-                sp = training_data(tr,d).spikes;
-                hp = training_data(tr,d).handPos;
-                if tNow <= size(sp,2) && tNow <= size(hp,2)
-                    phi = makeFeature(sp, tNow, binSize, Khist);
-                    Xphi = [Xphi, phi];
-                    Y = [Y, hp(1:2, tNow)];
-                end
-            end
-
-            N = size(Xphi, 2);
-            if N == 0
-                W{d,ti} = zeros(2, F);
-                continue;
-            end
-
-            % Project to PCA space
-            Scores = Ured' * (bsxfun(@minus, Xphi, muPhi));
-            Xreg = [Scores; ones(1,N)];
-
-            % Ridge regression
-            W{d,ti} = (Y * Xreg.') / (Xreg * Xreg.' + lambda * Ireg);
-        end
-    end
-
-    % Pack output
-    modelParameters.W = W;
-    modelParameters.dirMeanCounts = dirMeanCounts;
-    modelParameters.times = times;
-    modelParameters.binSize = binSize;
-    modelParameters.Khist = Khist;
-    modelParameters.tStart = tStart;
-    modelParameters.lambda = lambda;
-    modelParameters.PCA = struct('mu', muPhi, 'U', Ured, 'nComp', nComp);
-
+    classParams(ti).Wopt      = Wopt;
+    classParams(ti).mu        = mu_sub;
+    classParams(ti).centroids = centroids;
 end
 
-function phi = makeFeature(spikes, tNow, binSize, Khist)
-    [nNeurons, Ttrial] = size(spikes);
-    bNow = floor(tNow / binSize);
-    feat = zeros(nNeurons, Khist);
-    
-    for idx = 1:Khist
-        bj = bNow - Khist + idx;
-        if bj >= 1
-            t1 = max(1, (bj-1)*binSize + 1);
-            t2 = min(tNow, min(Ttrial, bj*binSize));
-            if t1 <= t2
-                feat(:,idx) = sum(spikes(:, t1:t2), 2);
+% -- 2. PCR Position Decoder ----------------------------------------------
+[F_reg, reg_labels, reg_t] = organise_features(trainingData, dt_reg, T_end);
+[~, ~, x_all, y_all, ~, ~] = extract_hand_pos(trainingData);
+
+% Align hand positions to the regression time grid
+x_grid = x_all(:, t_reg, :);   % nTrials x nTimes x 8
+y_grid = y_all(:, t_reg, :);
+
+regressors = struct();
+for ai = 1:8
+    for ti = 1:numel(t_reg)
+        T   = t_reg(ti);
+        Fti = F_reg(reg_t <= T, reg_labels == ai);   % features up to T, this direction
+
+        mu_x = mean(x_grid(:, ti, ai));
+        mu_y = mean(y_grid(:, ti, ai));
+        dx   = x_grid(:, ti, ai) - mu_x;
+        dy   = y_grid(:, ti, ai) - mu_y;
+
+        % PCR: project features to r PC directions, then OLS
+        [~, mu_f, U, ~] = pca_model(Fti, r);
+        W = U' * (Fti - mu_f);          % r x nTrials scores
+        WWT_inv = (W * W')^(-1);
+
+        regressors(ti, ai).mu_f  = mu_f;
+        regressors(ti, ai).U     = U;
+        regressors(ti, ai).bx    = U * WWT_inv * W * dx;
+        regressors(ti, ai).by    = U * WWT_inv * W * dy;
+        regressors(ti, ai).mu_x  = mu_x;
+        regressors(ti, ai).mu_y  = mu_y;
+    end
+end
+
+% -- Pack model -----------------------------------------------------------
+modelParameters.classParams  = classParams;
+modelParameters.t_class      = t_class;
+modelParameters.regressors   = regressors;
+modelParameters.t_reg        = t_reg;
+modelParameters.dt_reg       = dt_reg;
+modelParameters.dt_class     = dt_class;
+modelParameters.r             = r;
+modelParameters.avg_traj     = average_trajectory(trainingData);
+end
+
+
+%% -----------------------------------------------------------------------
+%  LOCAL HELPERS
+%% -----------------------------------------------------------------------
+
+function [X, labels, t_tag] = organise_features(data, dt, T_end)
+% Build feature matrix X (nFeatures x nSamples).
+% Each column is one (trial, direction) sample.
+% t_tag marks which time bin each feature row belongs to.
+% labels gives the direction class (1-8) for each column.
+    nNeurons = size(data(1,1).spikes, 1);
+    T        = dt:dt:T_end;
+    nBins    = numel(T);
+    nTrials  = size(data, 1);
+    nDirs    = size(data, 2);
+
+    % Raw 4-D array: neuron x trial x direction x bin
+    X0 = zeros(nNeurons, nTrials, nDirs, nBins);
+    for bi = 1:nBins
+        t1 = dt*(bi-1)+1;
+        t2 = dt*bi;
+        for k = 1:nDirs
+            for n = 1:nTrials
+                X0(:,n,k,bi) = sum(data(n,k).spikes(:, t1:t2), 2) / dt;
             end
         end
     end
-    
-    phi = feat(:);
+
+    % Stack bins vertically: (nNeurons*nBins) x nTrials x nDirs
+    X1    = zeros(nNeurons*nBins, nTrials, nDirs);
+    t_tag = zeros(1, nNeurons*nBins);
+    for bi = 1:nBins
+        rows = (bi-1)*nNeurons + (1:nNeurons);
+        X1(rows,:,:) = X0(:,:,:,bi);
+        t_tag(rows)  = T(bi);
+    end
+
+    % Flatten directions into columns
+    X      = zeros(nNeurons*nBins, nTrials*nDirs);
+    labels = zeros(1, nTrials*nDirs);
+    for k = 1:nDirs
+        cols         = (k-1)*nTrials + (1:nTrials);
+        X(:, cols)   = X1(:,:,k);
+        labels(cols) = k;
+    end
+end
+
+
+function [N, mu, U, L] = pca_model(X, p)
+% PCA via covariance eigen-decomposition.
+% Returns N=nSamples, mu=mean, U=top-p eigenvectors (data-space), L=eigenvalues.
+    N  = size(X, 2);
+    mu = mean(X, 2);
+    A  = X - mu;
+    S  = (A' * A) / N;          % sample-space covariance (faster when nFeatures >> N)
+    [V, L]   = eig(S);
+    p        = min(p, size(V,2));
+    [~, idx] = maxk(diag(L), p);
+    U        = A * V(:,idx);    % map back to feature space
+    U        = U ./ sqrt(sum(U.^2));   % unit-normalise columns
+    L        = L(idx,idx);
+end
+
+
+function [Sb, Sw] = scatter_matrices(X, labels)
+% Between-class (Sb) and within-class (Sw) scatter matrices.
+    mu_all = mean(X, 2);
+    classes = unique(labels);
+    mu_cls  = zeros(size(X,1), numel(classes));
+    for ci = 1:numel(classes)
+        mu_cls(:,ci) = mean(X(:, labels == classes(ci)), 2);
+    end
+    St = (X - mu_all) * (X - mu_all)';
+    Sb = (mu_cls - mu_all) * (mu_cls - mu_all)';
+    Sw = St - Sb;
+end
+
+
+function Wopt = lda_from_pca(Wpca, M_pca, M_lda, Sb, Sw)
+% Build PCA-then-LDA projection matrix (feature-space -> M_lda dims).
+    Wp = Wpca(:, 1:M_pca);
+    Sw_pca = Wp' * Sw * Wp;
+    Sb_pca = Wp' * Sb * Wp;
+    [Wlda, Llda] = eig(Sw_pca \ Sb_pca);
+    [~, idx] = maxk(diag(Llda), M_lda);
+    Wopt = Wp * Wlda(:,idx);
+end
+
+
+function avg = average_trajectory(data)
+% Per-direction average hand trajectory (x,y), padded to equal length.
+    nDirs   = size(data, 2);
+    nTrials = size(data, 1);
+
+    % Find global max length
+    Tmax = 0;
+    for k = 1:nDirs
+        for n = 1:nTrials
+            Tmax = max(Tmax, size(data(n,k).spikes, 2));
+        end
+    end
+
+    avg(nDirs).handPos = [];
+    for k = 1:nDirs
+        traj = zeros(2, Tmax);
+        for n = 1:nTrials
+            hp  = data(n,k).handPos(1:2,:);
+            len = size(hp,2);
+            % Pad last position
+            if len < Tmax
+                hp = [hp, repmat(hp(:,end), 1, Tmax-len)];
+            end
+            traj = traj + hp(:,1:Tmax);
+        end
+        avg(k).handPos = traj / nTrials;
+    end
+end
+
+
+function [mx, my, x, y, lengths, in_data] = extract_hand_pos(data)
+% Return per-trial hand positions as nTrialsxnTimex8 arrays (x and y).
+    nDirs   = 8;
+    nTrials = size(data, 1);
+
+    % Pass 1: find global max length
+    Tmax = 0;
+    lengths = zeros(nTrials, nDirs);
+    for k = 1:nDirs
+        for n = 1:nTrials
+            l = size(data(n,k).handPos, 2);
+            lengths(n,k) = l;
+            Tmax = max(Tmax, l);
+        end
+    end
+
+    x = zeros(nTrials, Tmax, nDirs);
+    y = zeros(nTrials, Tmax, nDirs);
+    in_data = zeros(nTrials, Tmax, nDirs);
+
+    for k = 1:nDirs
+        for n = 1:nTrials
+            hp  = data(n,k).handPos;
+            len = size(hp,2);
+            x(n, 1:len, k) = hp(1,:);
+            y(n, 1:len, k) = hp(2,:);
+            % Pad with last value
+            if len < Tmax
+                x(n, len+1:end, k) = hp(1,end);
+                y(n, len+1:end, k) = hp(2,end);
+            end
+            in_data(n, 1:len, k) = 1;
+        end
+    end
+
+    mx = squeeze(mean(x, 1))';   % 8 x Tmax
+    my = squeeze(mean(y, 1))';
 end
