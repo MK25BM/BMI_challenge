@@ -5,13 +5,12 @@
 % "positionEstimator" to decode the trajectory. 
 % clear ; close all; clc
 
-%% function RMSE = testFunction_for_students_MTb(tempname)
+%% function RMSE = testFunction_for_students_MTb(teamName)
 
 function [RMSE, Results] = testFunction_for_students_MTb(teamName)
 
 %load monkeydata0.mat
 load monkeydata_training
-clear positionEstimator
 
 % Set random number generator
 rng(2013);
