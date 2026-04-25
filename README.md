@@ -39,7 +39,7 @@ BMI_challenge/
 ├── PCA_RidgeReg/Fig 2.jpeg – Fig 6.jpeg  # PCA/Ridge model result figures
 │
 ├── CompetitionDocument.pdf          # Official competition specification
-└── BMI_CW_for_team_Monkey_Idols__MK_version_.pdf  # Team coursework report
+└── Paper IEEE_MK.pdf  # Team coursework report
 ```
 
 ---
