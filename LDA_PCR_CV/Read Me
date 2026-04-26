@@ -1,0 +1,27 @@
+LDA_PCR_CV/:
+
+positionEstimator.m — exact copy of LDA_PCR/positionEstimator.m 
+cv_train_model.m — refactored with tunable r, M_pca, M_lda; includes all 6 helper functions; clamps r = min(r, nTrials-1)
+cv_evaluate_fold.m — RMSE evaluator; sets startHandPos, clears persistent state before each trial
+step5_tune_r.m — K-Fold CV over r_grid = [2, 5, 10, 15, 20, 30, 40, 50]; saves r_cv_results.mat + 2 figures
+step6_tune_M_pca.m — K-Fold CV over M_pca_grid = [10, 20, 40, 60, 80, 100, 130, 170]; saves M_pca_cv_results.mat + 2 figures
+step7_tune_M_lda.m — K-Fold CV over M_lda_grid = [1..7]; saves M_lda_cv_results.mat + eigenspectrum figure
+step8_diagnostic_plots.m — 4 diagnostic figures + test RMSE vs 12.38 mm baseline
+step9_final_model.m — trains on all data, saves final_model_parameters.mat
+
+
+How to run
+
+% Step 0: Setup (run once)
+run('shared_cv_utils/step1_holdout_split.m')   % generates cv_splits.mat
+run('shared_cv_utils/step2_kfold_scaffold.m')  % generates fold_indices.mat
+
+% Step 1: Add path and tune in order (structural → regularisation)
+addpath('LDA_PCR_CV')
+run('LDA_PCR_CV/step5_tune_r.m')       % most important: r controls PCR overfitting
+run('LDA_PCR_CV/step6_tune_M_pca.m')  % PCA dims into LDA
+run('LDA_PCR_CV/step7_tune_M_lda.m')  % LDA dims kept
+
+% Step 2: Diagnostics and final model
+run('LDA_PCR_CV/step8_diagnostic_plots.m')  % test RMSE vs 12.38 mm baseline
+run('LDA_PCR_CV/step9_final_model.m')       % train on 100% data
