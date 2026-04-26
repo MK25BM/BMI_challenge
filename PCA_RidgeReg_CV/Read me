@@ -1,0 +1,49 @@
+Step 1 (holdout split)
+    └── Step 2 (CV scaffold)
+            └── Step 3 (refactor training helper)
+                    └── Step 4 (RMSE evaluator)
+                            ├── Step 5 (tune lambda)        → feeds Step 6
+                            ├── Step 6 (tune pcaVarFrac)    → feeds Step 7
+                            ├── Step 7 (tune Khist)         → feeds Step 8
+                            └── Step 8 (diagnostic plots)
+                                        └── Step 9 (final retrain)
+                                                └── Step 10 (update model file)
+
+
+Run in order 
+
+PCA_RidgeReg_CV/step1_holdout_split.m
+Output: cv_splits.mat saved in PCA_RidgeReg_CV/
+Console will print: total trials, CV pool size, test set size
+
+step2_kfold_scaffold.m
+Output: fold_indices.mat saved in PCA_RidgeReg_CV/
+%Console will print: size of each fold to confirm balance
+
+
+step5_tune_lambda.m
+Output: lambda_cv_results.mat
+Figures: Lambda vs CV RMSE, Train vs Val RMSE (bias-variance)
+Console will print: >> Optimal lambda: X
+
+step6_tune_pcaVarFrac.m')
+Output: pcaVarFrac_cv_results.mat
+Figures: Scree plot, pcaVarFrac vs CV RMSE
+Console will print: >> Optimal pcaVarFrac: X
+
+step7_tune_Khist.m')
+Output: Khist_cv_results.mat
+Figures: Khist vs CV RMSE
+Console will print: >> Optimal Khist: X
+
+step8_diagnostic_plots.m')
+Figures:
+1. Per-fold RMSE bar chart
+2. RMSE per reaching angle
+3. RMSE over time (320ms → end)
+4. Predicted vs Actual trajectories (2x4 grid)
+Console will print: >> Final test RMSE: X mm
+
+step9_final_model.m')
+Output: final_model_parameters.mat
+Console will print: optimal hyperparameters summary + save confirmation
